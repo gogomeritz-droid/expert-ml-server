@@ -68,11 +68,17 @@ def get_fallback_stats(monster_records, index):
     results = []
     
     if total_count > 0:
+        # 데이터가 1건 이상 5건 미만일 때는 실제 기록된 빈도 비율로 계산
         for weapon in WEAPONS:
             count = weapon_counts[weapon]
             percent = round(float(count / total_count * 100), 1)
             results.append({"weapon": weapon, "percent": percent})
     else:
+        # ==============================================================================
+        # [주석] 🛑 바로 이 구간이 데이터가 '0건(아예 없을 때)' 가짜(더미) 데이터를 만드는 코드입니다!
+        # - 디리클레 분포(Dirichlet distribution)를 이용해 9개 무기의 확률을 합이 100%가 되도록
+        #   무작위로 임의로 쪼개서 가짜 확률 데이터를 만들어 반환합니다.
+        # ==============================================================================
         np.random.seed(len(raid_database) + index + 42)
         raw_probs = np.random.dirichlet(np.ones(len(WEAPONS)), size=1)[0]
         for weapon, prob in zip(WEAPONS, raw_probs):
