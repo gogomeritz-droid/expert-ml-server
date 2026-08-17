@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: my-roblox-ml-server-metaverse-2026-3092704
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn main:app
+    autoDeploy: true
