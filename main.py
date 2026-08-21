@@ -102,6 +102,7 @@ def run_machine_learning_pipeline():
     all_monster_results = {}
     
     # 8가지 몬스터를 각각 순회하며 머신러닝 학습 또는 통계 산출 진행
+     # 8가지 몬스터를 각각 순회하며 머신러닝 학습 또는 통계 산출 진행
     for index, monster in enumerate(MONSTERS):
         monster_records = [item for item in raid_database if item.get("monster") == monster]
         monster_results = []
