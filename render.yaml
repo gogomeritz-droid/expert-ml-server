@@ -10,3 +10,4 @@ services:
         value: "#1480epvp+6q9=07"
       - key: PYTHON_VERSION
         value: 3.11.9
+-- 테스트
