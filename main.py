@@ -9,7 +9,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sklearn.ensemble import RandomForestClassifier
 
-app = FastAPI(title="Roblox ML Balance Server", version="1.0.0")
+app = FastAPI(title="Roblox ML Balance Server", version="1.0.2-ml")
 
 API_KEY = os.getenv("API_KEY", "#1480epvp+6q9=07")
 
