@@ -1,7 +1,12 @@
 services:
   - type: web
-    name: my-roblox-ml-server-metaverse-2026-3092704
-    runtime: python
+    name: roblox-ml-balance-server
+    env: python
+    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn main:app
-    autoDeploy: true
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: API_KEY
+        value: "#1480epvp+6q9=07"
+      - key: PYTHON_VERSION
+        value: 3.11.9
