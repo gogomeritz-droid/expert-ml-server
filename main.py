@@ -37,7 +37,6 @@ DEFAULT_WEAPONS = [
     "강철검",
 ]
 
-# 기본 추천값입니다. 실제 레이드 기록이 쌓이면 RandomForest + 누적 기여도 기반으로 보정됩니다.
 DEFAULT_RAID_PRIORS: Dict[str, Dict[str, float]] = {
     "좀비 골렘": {
         "티타늄 검": 28,
@@ -163,7 +162,6 @@ def normalize_text(value: Any) -> str:
 
 def get_metadata_lists(metadata: Optional[Dict[str, Any]]) -> Dict[str, List[str]]:
     metadata = metadata or {}
-
     raids = []
     for key in ["knownRaids", "raidNames", "bossNames"]:
         raw = metadata.get(key)
@@ -229,7 +227,6 @@ def normalize_raid_record(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def train_raid_model(metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     global raid_model, last_raid_train_at
-
     lists = get_metadata_lists(metadata)
     raids = lists["raids"]
     weapons = lists["weapons"]
@@ -248,12 +245,15 @@ def train_raid_model(metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any
         y_rows.append(weapon_index[weapon])
 
     if len(x_rows) >= 3 and len(set(y_rows)) >= 2:
-        raid_model = RandomForestClassifier(
-            n_estimators=80,
-            random_state=42,
-            class_weight="balanced_subsample",
-        )
-        raid_model.fit(np.array(x_rows), np.array(y_rows))
+        try:
+            raid_model = RandomForestClassifier(
+                n_estimators=80,
+                random_state=42,
+                class_weight="balanced_subsample",
+            )
+            raid_model.fit(np.array(x_rows), np.array(y_rows))
+        except Exception:
+            raid_model = None
     else:
         raid_model = None
 
@@ -294,15 +294,18 @@ def model_for_boss(boss: str, raids: List[str], weapons: List[str]) -> Dict[str,
     if raid_model is None or boss not in raids:
         return {weapon: 0.0 for weapon in weapons}
 
-    raid_idx = raids.index(boss)
-    x = np.array([[raid_idx, 0.5]])
-    proba = raid_model.predict_proba(x)[0]
-    result = {weapon: 0.0 for weapon in weapons}
-    for class_id, probability in zip(raid_model.classes_, proba):
-        class_id = int(class_id)
-        if 0 <= class_id < len(weapons):
-            result[weapons[class_id]] = float(probability) * 100
-    return result
+    try:
+        raid_idx = raids.index(boss)
+        x = np.array([[raid_idx, 0.5]])
+        proba = raid_model.predict_proba(x)[0]
+        result = {weapon: 0.0 for weapon in weapons}
+        for class_id, probability in zip(raid_model.classes_, proba):
+            class_id = int(class_id)
+            if 0 <= class_id < len(weapons):
+                result[weapons[class_id]] = float(probability) * 100
+        return result
+    except Exception:
+        return {weapon: 0.0 for weapon in weapons}
 
 
 def recommendations_for_boss(boss: str, metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
@@ -316,7 +319,6 @@ def recommendations_for_boss(boss: str, metadata: Optional[Dict[str, Any]] = Non
 
     result = []
     for weapon in weapons:
-        # 기본값 55%, 실제 누적 데이터 25%, RandomForest 예측 20%를 혼합합니다.
         score = prior.get(weapon, 0) * 0.55 + empirical.get(weapon, 0) * 0.25 + model_scores.get(weapon, 0) * 0.20
         result.append({"weapon": weapon, "percent": round(score, 2)})
 
@@ -346,29 +348,24 @@ def aggregate_balance_features(records: Optional[List[Dict[str, Any]]] = None) -
 
     for record in records:
         event_type = normalize_text(record.get("eventType"))
-
         if event_type in ["weapon_usage", "weapon_crafted", "weapon_equipped"]:
             weapon = normalize_text(record.get("weapon")) or "Unknown"
             bucket = weapon_usage.setdefault(weapon, {"crafted": 0.0, "equipped": 0.0})
             bucket["crafted"] += safe_float(record.get("crafted"), safe_float(record.get("amount"), 1))
             bucket["equipped"] += safe_float(record.get("equipped"), safe_float(record.get("used"), 0))
-
         elif event_type in ["boss_clear_time", "monster_clear_time"]:
             boss = normalize_text(record.get("boss") or record.get("monster")) or "Unknown"
             seconds = safe_float(record.get("seconds") or record.get("clearTime"), 0)
             if seconds > 0:
                 boss_times.setdefault(boss, []).append(seconds)
-
         elif event_type == "quiz_result":
             level = normalize_text(record.get("level") or record.get("mission") or "기본")
             bucket = quiz_stats.setdefault(level, {"clear": 0.0, "giveup": 0.0})
             bucket["clear"] += safe_float(record.get("clear"), 0)
             bucket["giveup"] += safe_float(record.get("giveup"), 0)
-
         elif event_type == "hourly_flow":
             hour = int(safe_float(record.get("hour"), 0)) % 24
             hourly_flow[hour] = hourly_flow.get(hour, 0.0) + safe_float(record.get("players"), 0) + safe_float(record.get("huntMinutes"), 0) / 10.0
-
         elif event_type == "map_risk":
             map_name = normalize_text(record.get("map")) or "Unknown"
             bucket = map_risk.setdefault(map_name, {"deaths": 0.0, "stayMinutes": 0.0})
@@ -416,35 +413,15 @@ def aggregate_balance_features(records: Optional[List[Dict[str, Any]]] = None) -
             "입자 가속기": {"deaths": 55, "stayMinutes": 210},
         }
 
-    weapon_ratios = []
-    for weapon, values in weapon_usage.items():
-        crafted = max(1.0, values.get("crafted", 0.0))
-        equipped = values.get("equipped", 0.0)
-        weapon_ratios.append({"label": weapon, "value": round((equipped / crafted) * 100, 2)})
-
-    boss_avg_times = []
-    for boss, times in boss_times.items():
-        avg_time = sum(times) / max(1, len(times))
-        boss_avg_times.append({"label": boss, "value": round(avg_time, 2)})
-
-    quiz_matrix = []
-    quiz_y_labels = []
-    for level, values in quiz_stats.items():
-        clear = values.get("clear", 0.0)
-        giveup = values.get("giveup", 0.0)
-        quiz_y_labels.append(level)
-        quiz_matrix.append([clear, giveup])
-
+    weapon_ratios = [{"label": weapon, "value": round((values.get("equipped", 0.0) / max(1.0, values.get("crafted", 0.0))) * 100, 2)} for weapon, values in weapon_usage.items()]
+    boss_avg_times = [{"label": boss, "value": round(sum(times) / max(1, len(times)), 2)} for boss, times in boss_times.items()]
+    
+    quiz_y_labels = list(quiz_stats.keys())
+    quiz_matrix = [[values.get("clear", 0.0), values.get("giveup", 0.0)] for values in quiz_stats.values()]
     hourly_items = [{"label": f"{hour:02d}시", "value": round(value, 2)} for hour, value in sorted(hourly_flow.items())]
 
-    map_y_labels = []
-    map_matrix = []
-    for map_name, values in map_risk.items():
-        map_y_labels.append(map_name)
-        deaths = values.get("deaths", 0.0)
-        stay = values.get("stayMinutes", 0.0)
-        risk = deaths / max(1.0, stay / 60.0)
-        map_matrix.append([round(deaths, 2), round(stay, 2), round(risk, 2)])
+    map_y_labels = list(map_risk.keys())
+    map_matrix = [[round(v.get("deaths", 0.0), 2), round(v.get("stayMinutes", 0.0), 2), round(v.get("deaths", 0.0) / max(1.0, v.get("stayMinutes", 0.0) / 60.0), 2)] for v in map_risk.values()]
 
     avg_weapon_use = sum(item["value"] for item in weapon_ratios) / max(1, len(weapon_ratios))
     avg_boss_time = sum(item["value"] for item in boss_avg_times) / max(1, len(boss_avg_times))
@@ -469,48 +446,51 @@ def aggregate_balance_features(records: Optional[List[Dict[str, Any]]] = None) -
 
 def train_balance_model() -> Dict[str, Any]:
     global balance_model, last_balance_train_at
+    try:
+        rng = random.Random(42)
+        x_rows = []
+        y_rows = []
+        for _ in range(240):
+            weapon_use = rng.uniform(10, 95)
+            boss_time = rng.uniform(100, 420)
+            giveup = rng.uniform(2, 65)
+            peak = rng.uniform(8, 35)
+            map_risk = rng.uniform(1, 25)
+            x_rows.append([weapon_use, boss_time, giveup, peak, map_risk])
+            if weapon_use < 35:
+                label = 0
+            elif boss_time > 300:
+                label = 1
+            elif giveup > 40:
+                label = 2
+            else:
+                label = 3
+            y_rows.append(label)
 
-    # 5개 패널별 후보 4개를 고르는 분류 모델입니다.
-    # 실제 라이브 데이터가 적을 때도 동작하도록 합성 학습 샘플을 함께 사용합니다.
-    rng = random.Random(42)
-    x_rows = []
-    y_rows = []
-    for _ in range(240):
-        weapon_use = rng.uniform(10, 95)
-        boss_time = rng.uniform(100, 420)
-        giveup = rng.uniform(2, 65)
-        peak = rng.uniform(8, 35)
-        map_risk = rng.uniform(1, 25)
-        features = [weapon_use, boss_time, giveup, peak, map_risk]
-        x_rows.append(features)
+        if len(balance_records) >= 3:
+            features = aggregate_balance_features()["featureVector"]
+            x_rows.append(features)
+            y_rows.append(int(max(range(4), key=lambda i: [100 - features[0], features[1], features[2], features[4]][i])))
 
-        if weapon_use < 35:
-            label = 0
-        elif boss_time > 300:
-            label = 1
-        elif giveup > 40:
-            label = 2
-        else:
-            label = 3
-        y_rows.append(label)
+        balance_model = RandomForestClassifier(n_estimators=100, random_state=77)
+        balance_model.fit(np.array(x_rows), np.array(y_rows))
+    except Exception:
+        balance_model = None
 
-    if len(balance_records) >= 3:
-        features = aggregate_balance_features()["featureVector"]
-        x_rows.append(features)
-        y_rows.append(int(max(range(4), key=lambda i: [100 - features[0], features[1], features[2], features[4]][i])))
-
-    balance_model = RandomForestClassifier(n_estimators=100, random_state=77)
-    balance_model.fit(np.array(x_rows), np.array(y_rows))
     last_balance_train_at = now_iso()
-    return {"ok": True, "trained": True, "records": len(balance_records), "updatedAt": last_balance_train_at}
+    return {"ok": True, "trained": balance_model is not None, "records": len(balance_records), "updatedAt": last_balance_train_at}
 
 
 def choose_candidate(features: List[float], panel_offset: int) -> int:
     if balance_model is None:
         train_balance_model()
-    assert balance_model is not None
-    predicted = int(balance_model.predict(np.array([features]))[0])
-    return (predicted + panel_offset) % 4
+    try:
+        if balance_model is not None:
+            predicted = int(balance_model.predict(np.array([features]))[0])
+            return (predicted + panel_offset) % 4
+    except Exception:
+        pass
+    return panel_offset % 4
 
 
 def build_balance_panels(mode: str, start_date: str = "", end_date: str = "") -> Dict[str, Any]:
@@ -661,14 +641,16 @@ def api_balance_analyze(payload: BalanceAnalyzeRequest, x_api_key: Optional[str]
     return build_balance_panels(mode, payload.startDate, payload.endDate)
 
 
-# 기존 RenderHttp 방식 호환용: 레이드 기록 1개 또는 여러 개를 저장합니다.
 @app.post("/update_raid")
 async def legacy_update_raid(request: Request, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     require_api_key(x_api_key)
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
     records = body.get("records") if isinstance(body, dict) else None
     if not isinstance(records, list):
-        records = [body]
+        records = [body] if body else []
     added = 0
     for record in records:
         if isinstance(record, dict):
@@ -681,7 +663,6 @@ async def legacy_update_raid(request: Request, x_api_key: Optional[str] = Header
     return result
 
 
-# 기존 RenderHttp 방식 호환용: /predict?monster=ALL_MONSTERS 또는 /predict?monster=좀비 골렘
 @app.get("/predict")
 def legacy_predict(
     monster: str = Query(default="ALL_MONSTERS"),
@@ -703,6 +684,5 @@ def legacy_predict(
     }
 
 
-# Render가 서버를 시작한 직후에도 기본 모델이 준비되도록 초기 학습을 수행합니다.
 train_raid_model({})
 train_balance_model()
