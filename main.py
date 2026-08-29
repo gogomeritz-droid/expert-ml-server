@@ -1,3 +1,33 @@
+# ==============================================================================
+# Roblox Render ML Server main.py
+# 상세 주석 버전
+# ==============================================================================
+# 이 파일은 Roblox Studio의 ReplicatedStorage.ML_Render_main_py_TextFile.Value에
+# 저장해 둔 Python 서버 코드입니다.
+#
+# 실제 사용 방법:
+# 1. Roblox Studio에서 ReplicatedStorage > ML_Render_main_py_TextFile을 선택합니다.
+# 2. Properties 창의 Value 값을 전체 복사합니다.
+# 3. Render 서버 프로젝트의 main.py 파일에 그대로 붙여넣습니다.
+# 4. Render Dashboard의 Environment Variables에 API_KEY를 추가합니다.
+# 5. Roblox Script의 API_KEY와 Render 서버의 API_KEY가 완전히 같아야 합니다.
+#
+# 이 서버의 역할:
+# - Roblox 레이드 종료 데이터를 받아 학습합니다.
+# - 8개 레이드 보스별 추천 무기 목록을 반환합니다.
+# - AiBalance UI에서 사용하는 5개 분석 패널 데이터를 생성합니다.
+# - RandomForestClassifier를 사용하며, 데이터가 적어도 기본값을 이용해 결과를 반환합니다.
+#
+# 보안 방식:
+# - Roblox 서버 Script는 HTTP Header에 X-API-Key를 넣어서 요청합니다.
+# - Python 서버는 require_api_key()에서 Header 값을 검사합니다.
+# - 키가 틀리면 HTTP 401 Invalid API key를 반환합니다.
+# - LocalScript가 직접 Render 서버를 호출하지 않고 ServerScriptService.MLRenderBridge를 거치는 구조가 안전합니다.
+#
+# 현재 사용 중인 API 키:
+# #1480epvp+6q9=07
+# ==============================================================================
+
 import os
 import math
 import random
@@ -11,8 +41,15 @@ from sklearn.ensemble import RandomForestClassifier
 
 app = FastAPI(title="Roblox ML Balance Server", version="1.0.2-ml")
 
+# Render 환경변수에서 API_KEY를 읽습니다.
+# Render Dashboard에 API_KEY 환경변수가 있으면 그 값을 사용하고,
+# 없으면 두 번째 인자인 기본값을 사용합니다.
+# Roblox의 MLRenderBridge.lua에 들어간 API_KEY와 반드시 같아야 합니다.
 API_KEY = os.getenv("API_KEY", "#1480epvp+6q9=07")
 
+# 기본 레이드 보스 목록입니다.
+# ML 추천 시스템은 아래 8개 보스를 기준으로 추천 결과를 생성합니다.
+# Roblox에서 metadata.knownRaids가 오면 이 목록과 병합됩니다.
 DEFAULT_RAIDS = [
     "좀비 골렘",
     "아이스 골렘",
@@ -24,6 +61,9 @@ DEFAULT_RAIDS = [
     "미노타우로스",
 ]
 
+# 기본 무기 목록입니다.
+# 실제 게임의 ServerStorage 무기 목록이 metadata로 들어오면 이 목록과 합쳐집니다.
+# 초기 데이터가 부족해도 추천 UI가 비지 않도록 기본 무기 목록을 둡니다.
 DEFAULT_WEAPONS = [
     "하슘 블랙홀검",
     "로렌슘 검",
@@ -36,7 +76,9 @@ DEFAULT_WEAPONS = [
     "강철검",
 ]
 
-# 기본 추천값입니다. 실제 레이드 기록이 쌓이면 RandomForest + 누적 기여도 기반으로 보정됩니다.
+# 기본 추천값입니다.
+# 실제 레이드 기록이 충분히 쌓이기 전에도 보스별 추천 무기가 나오도록 하는 사전 가중치입니다.
+# 이후 레이드 데이터가 누적되면 RandomForest 예측값과 실제 누적 기여도 기반 값으로 보정됩니다.
 DEFAULT_RAID_PRIORS: Dict[str, Dict[str, float]] = {
     "좀비 골렘": {
         "티타늄 검": 28,
@@ -128,6 +170,9 @@ DEFAULT_RAID_PRIORS: Dict[str, Dict[str, float]] = {
     },
 }
 
+# 서버 메모리에 저장되는 레이드 학습 데이터입니다.
+# Render 서버가 재시작되면 메모리 데이터는 사라질 수 있습니다.
+# 장기 보존이 필요하면 외부 DB나 파일 저장소를 추가하는 것이 좋습니다.
 raid_records: List[Dict[str, Any]] = []
 balance_records: List[Dict[str, Any]] = []
 raid_model: Optional[RandomForestClassifier] = None
@@ -138,10 +183,15 @@ cached_raid_recommendations: Dict[str, List[Dict[str, Any]]] = {}
 cached_balance_panels: Dict[str, Any] = {}
 
 
+# 현재 UTC 시간을 ISO 문자열로 반환합니다.
+# API 응답의 updatedAt, trainedAt 표시에 사용됩니다.
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Roblox 서버가 보낸 X-API-Key Header를 검사합니다.
+# Header가 없거나 API_KEY와 다르면 요청을 거부합니다.
+# 주의: if x_api_key != API_KEY: 뒤에 #키값을 붙이는 것은 주석일 뿐 실제 키 설정이 아닙니다.
 def require_api_key(x_api_key: Optional[str]) -> None:
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -151,6 +201,9 @@ def normalize_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+# Roblox에서 전달된 metadata를 정리합니다.
+# metadata에는 knownRaids, knownWeapons, MonsterTOOL, RaidRewards 이름 등이 들어올 수 있습니다.
+# 기본 목록과 Roblox 목록을 합치고 중복을 제거합니다.
 def get_metadata_lists(metadata: Optional[Dict[str, Any]]) -> Dict[str, List[str]]:
     metadata = metadata or {}
 
@@ -181,18 +234,24 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+# /api/raid/train 요청 Body 형식입니다.
+# Roblox MLRenderBridge가 레이드 종료 데이터를 모아서 records에 담아 보냅니다.
 class RaidTrainRequest(BaseModel):
     reason: str = "manual"
     metadata: Dict[str, Any] = Field(default_factory=dict)
     records: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+# /api/balance/train 요청 Body 형식입니다.
+# 무기 사용률, 보스 클리어 시간, 퀴즈, 시간대 흐름, 맵 위험도 같은 밸런스 데이터를 받습니다.
 class BalanceTrainRequest(BaseModel):
     reason: str = "manual"
     metadata: Dict[str, Any] = Field(default_factory=dict)
     records: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+# /api/balance/analyze 요청 Body 형식입니다.
+# mode가 pretrained이면 기존 학습 결과를 사용하고, retrain이면 기간 조건으로 즉시 재분석합니다.
 class BalanceAnalyzeRequest(BaseModel):
     mode: str = "pretrained"
     startDate: str = ""
@@ -200,6 +259,8 @@ class BalanceAnalyzeRequest(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+# Roblox에서 온 레이드 기록 1건을 표준 형식으로 정리합니다.
+# boss/monster 이름, weapon 이름, contribution, userId, timestamp를 안정적으로 보정합니다.
 def normalize_raid_record(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     boss = normalize_text(record.get("boss") or record.get("monster") or record.get("raid"))
     weapon = normalize_text(record.get("weapon") or record.get("tool") or record.get("item"))
@@ -217,6 +278,8 @@ def normalize_raid_record(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
+# 레이드 무기 추천 모델을 학습합니다.
+# 데이터가 부족해도 기본값을 이용해 RandomForestClassifier와 추천 캐시를 갱신합니다.
 def train_raid_model(metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     global raid_model, last_raid_train_at, cached_raid_recommendations
 
@@ -309,6 +372,8 @@ def model_for_boss(boss: str, raids: List[str], weapons: List[str]) -> Dict[str,
     return result
 
 
+# 한 보스에 대한 최종 추천 무기 목록을 만듭니다.
+# 기본 가중치, 실제 누적 기여도, ML 모델 예측값을 섞어 percent 값을 계산합니다.
 def recommendations_for_boss(boss: str, metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     lists = get_metadata_lists(metadata)
     raids = lists["raids"]
@@ -379,6 +444,8 @@ def filter_records_by_period(records: List[Dict[str, Any]], start_date: str = ""
     return filtered
 
 
+# AiBalance 시각화에 필요한 통계값을 집계합니다.
+# 무기 제작/사용 비율, 보스 클리어 시간, 퀴즈 정답률, 시간대별 활동량, 맵 위험도 등을 계산합니다.
 def aggregate_balance_features(records: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     records = records if records is not None else balance_records
 
@@ -572,6 +639,8 @@ def choose_candidate(features: List[float], panel_offset: int) -> int:
     return (predicted + panel_offset) % 4
 
 
+# AiBalance UI에 표시할 5개 패널 데이터를 생성합니다.
+# pretrained는 캐시된 결과를 사용하고, retrain은 선택 기간 데이터를 다시 분석합니다.
 def build_balance_panels(mode: str, start_date: str = "", end_date: str = "") -> Dict[str, Any]:
     if mode == "retrain":
         train_balance_model()
@@ -658,11 +727,15 @@ def build_balance_panels(mode: str, start_date: str = "", end_date: str = "") ->
     return result
 
 
+# 서버 기본 상태 확인용 엔드포인트입니다.
+# Render 서버 주소를 브라우저로 열었을 때 서버가 살아 있는지 확인할 수 있습니다.
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {"ok": True, "service": "Roblox ML Balance Server", "updatedAt": now_iso()}
 
 
+# Render 헬스체크용 엔드포인트입니다.
+# 배포 후 서버 생존 여부와 간단한 상태 확인에 사용합니다.
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {
@@ -675,6 +748,9 @@ def health() -> Dict[str, Any]:
     }
 
 
+# 새 레이드 학습 데이터 수신 API입니다.
+# Roblox MLRenderBridge가 매일 01시 또는 즉시 전송 시 records를 모아 호출합니다.
+# X-API-Key 인증을 통과해야 처리됩니다.
 @app.post("/api/raid/train")
 def api_raid_train(payload: RaidTrainRequest, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     require_api_key(x_api_key)
@@ -690,6 +766,8 @@ def api_raid_train(payload: RaidTrainRequest, x_api_key: Optional[str] = Header(
     return result
 
 
+# 8개 레이드 보스 전체의 추천 무기 목록을 반환합니다.
+# AiWeapon UI가 보스별 추천 결과를 표시할 때 사용합니다.
 @app.get("/api/raid/recommendations/all")
 def api_raid_recommendations_all(x_api_key: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     require_api_key(x_api_key)
@@ -705,6 +783,8 @@ def api_raid_recommendations_all(x_api_key: Optional[str] = Header(default=None)
     }
 
 
+# AiBalance 학습 데이터 수신 API입니다.
+# Roblox에서 누적한 telemetry records를 받아 밸런스 모델과 캐시를 갱신합니다.
 @app.post("/api/balance/train")
 def api_balance_train(payload: BalanceTrainRequest, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     require_api_key(x_api_key)
@@ -718,6 +798,8 @@ def api_balance_train(payload: BalanceTrainRequest, x_api_key: Optional[str] = H
     return result
 
 
+# AiBalance 분석 결과 반환 API입니다.
+# mode='pretrained' 또는 mode='retrain'에 따라 5개 패널 데이터를 반환합니다.
 @app.post("/api/balance/analyze")
 def api_balance_analyze(payload: BalanceAnalyzeRequest, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     require_api_key(x_api_key)
@@ -726,6 +808,9 @@ def api_balance_analyze(payload: BalanceAnalyzeRequest, x_api_key: Optional[str]
 
 
 # 기존 RenderHttp 방식 호환용: 레이드 기록 1개 또는 여러 개를 저장합니다.
+# 구버전 호환 API입니다.
+# 예전 Roblox Script(RenderHttp)가 /update_raid로 데이터를 보낼 때도 동작하도록 유지합니다.
+# 새 구조에서는 /api/raid/train 사용을 권장합니다.
 @app.post("/update_raid")
 async def legacy_update_raid(request: Request, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     require_api_key(x_api_key)
@@ -746,6 +831,9 @@ async def legacy_update_raid(request: Request, x_api_key: Optional[str] = Header
 
 
 # 기존 RenderHttp 방식 호환용: /predict?monster=ALL_MONSTERS 또는 /predict?monster=좀비 골렘
+# 구버전 호환 예측 API입니다.
+# 예전 Roblox Script가 /predict?monster=... 형식으로 호출할 때 사용됩니다.
+# 새 구조에서는 /api/raid/recommendations/all 사용을 권장합니다.
 @app.get("/predict")
 def legacy_predict(
     monster: str = Query(default="ALL_MONSTERS"),
